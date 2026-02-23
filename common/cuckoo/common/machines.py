@@ -50,6 +50,7 @@ class Machine:
         architecture="",
         interface="",
         agent_port=8000,
+        vnc_port=0,
     ):
         # Configuration information
         self.name = name
@@ -63,6 +64,7 @@ class Machine:
         self.architecture = architecture
         self.interface = interface
         self.agent_port = agent_port
+        self.vnc_port = vnc_port
 
         self.machinery = machinery
         if machinery:
@@ -155,6 +157,7 @@ class Machine:
             "architecture": self.architecture,
             "interface": self.interface,
             "agent_port": self.agent_port,
+            "vnc_port": self.vnc_port,
             "mac_address": self.mac_address,
             "machinery_name": self.machinery_name,
             "state": self.state,
@@ -203,6 +206,7 @@ class Machine:
             errors=d["errors"],
             machinery_name=d["machinery_name"],
             agent_port=d.get("agent_port", 8000),
+            vnc_port=d.get("vnc_port", 0),
         )
 
 

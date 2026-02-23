@@ -121,6 +121,9 @@ typeloaders = {
                 "agent_port": config.Int(
                     default_val=8000, required=False, min_value=1, max_value=2**16 - 1
                 ),
+                "vnc_port": config.Int(
+                    default_val=0, required=False, min_value=0, max_value=5999
+                ),
                 "tags": config.List(
                     config.String, ["exampletag1", "exampletag2"], allow_empty=True
                 ),

@@ -195,6 +195,53 @@ class NodeCtx:
         self.zip_results = False
         self.rooter_sock = None
         self.is_resetting = False
+        # Live view components (optional)
+        self.live_broker = None
+        self.vnc_token_manager = None
+        self.websockify_process = None
+
+
+def start_live_components(ctx, api_loop=None):
+    """Initialize optional live telemetry and VNC proxy components.
+
+    This function is best-effort: if websockify is missing or VNC is not
+    configured, the rest of Cuckoo keeps working normally.
+    """
+    from cuckoo.node.live import LiveEventBroker
+    from cuckoo.node.vncproxy import VNCTokenManager, WebsockifyProcess
+    from cuckoo.node.resultserver import FileUpload, ScreenshotUpload
+
+    broker = LiveEventBroker()
+    if api_loop:
+        broker.attach_loop(api_loop)
+
+    ctx.live_broker = broker
+
+    # Inject broker into the result server protocol handlers so they can
+    # stream events during file uploads.  These are class-level attributes
+    # so they work across all handler instances.
+    FileUpload.live_broker = broker
+    ScreenshotUpload.live_broker = broker
+
+    # VNC token file and websockify (optional, only if port is configured)
+    try:
+        vnc_ws_port = config.cfg("cuckoo.yaml", "cuckoo", "live", "vnc_ws_port")
+    except Exception:
+        vnc_ws_port = 0
+
+    if vnc_ws_port > 0:
+        token_file = str(Paths.log("vnc_tokens.conf"))
+        vnc_mgr = VNCTokenManager(token_file)
+        ctx.vnc_token_manager = vnc_mgr
+
+        ws_proc = WebsockifyProcess(vnc_ws_port, token_file)
+        ctx.websockify_process = ws_proc
+        ws_proc.start()
+        shutdown.register_shutdown(ws_proc.stop)
+    else:
+        log.debug(
+            "Live VNC proxy not started (cuckoo.live.vnc_ws_port not set or 0)"
+        )
 
 
 def start_local(stream_receiver, loglevel):
@@ -210,6 +257,7 @@ def start_local(stream_receiver, loglevel):
     ctx.node = node
     shutdown.register_shutdown(node.stop)
     node.start()
+    start_live_components(ctx)
     start_nodestatecontrol(ctx, threaded=True)
     return ctx
 
@@ -253,6 +301,9 @@ def start_remote(loglevel, api_host="localhost", api_port=8090):
         runner.create_site(host=api_host, port=api_port)
     except OSError as e:
         raise StartupError(e)
+
+    # Attach the live broker to the api event loop so it can dispatch events
+    start_live_components(ctx, api_loop=runner.loop)
 
     threading.Thread(target=runner.run_forever).start()
     start_nodestatecontrol(ctx)

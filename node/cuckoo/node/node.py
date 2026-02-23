@@ -386,6 +386,55 @@ class Node:
     def work_exists(self, analysis_id):
         return self._task_tracker.work_exists(analysis_id)
 
+    def get_vnc_info(self, task_id):
+        """Return (vnc_port, vnc_token) for the machine running task_id.
+        Raises KeyError if task_id is not tracked."""
+        taskwork = self._task_tracker._tasks.get(task_id)
+        if not taskwork:
+            raise KeyError(f"Task {task_id} is not currently tracked")
+
+        machine = taskwork.machine
+        if machine.machinery is None:
+            raise RuntimeError("Machine has no machinery reference")
+
+        if not hasattr(machine.machinery, "get_vnc_info"):
+            return 0, ""
+
+        return machine.machinery.get_vnc_info(machine)
+
+    def rotate_vnc_token(self, task_id):
+        """Generate a new VNC password for the machine running task_id.
+        Updates the token in the VNC proxy token file.
+        Raises KeyError if task_id is not tracked or VNC is not enabled."""
+        import secrets as _secrets
+        from cuckoo.common.ipc import QMPError as _QMPError
+
+        taskwork = self._task_tracker._tasks.get(task_id)
+        if not taskwork:
+            raise KeyError(f"Task {task_id} is not currently tracked")
+
+        machine = taskwork.machine
+        if machine.machinery is None or not hasattr(machine.machinery, "_get_vm"):
+            raise RuntimeError("Cannot rotate VNC token: no QEMU machinery")
+
+        vm = machine.machinery._get_vm(machine.name)
+        if not vm.vnc_port:
+            raise RuntimeError("VNC not configured for this machine")
+
+        old_token = vm.vnc_token
+        new_token = _secrets.token_hex(16)
+        try:
+            vm.qmp.execute("change-vnc-password", {"password": new_token})
+            vm.vnc_token = new_token
+        except Exception as e:
+            raise RuntimeError(f"Failed to rotate VNC password: {e}")
+
+        # Update the VNC token manager if available
+        vnc_mgr = getattr(self.ctx, "vnc_token_manager", None)
+        if vnc_mgr:
+            vnc_mgr.remove(old_token)
+            vnc_mgr.add(task_id, vm.vnc_port, new_token)
+
     def start(self):
         for _ in range(self.NUM_TASK_START_WORKER):
             worker = _TaskStartWorker(self._queue, self._task_tracker, self.ctx)

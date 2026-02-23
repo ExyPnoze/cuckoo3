@@ -183,8 +183,36 @@ class WriteLimiter:
 
 
 class FileUpload(ProtocolHandler):
+    # Pattern matching behavioural log files we want to stream live
+    _LIVE_LOG_NAMES = ("onemon.json", "onemon.pb", "onemon")
+
+    # Injected by startup when the LiveEventBroker is available
+    live_broker = None
+
     def init(self):
         self.max_upload_size = 1024 * 1024 * 128  # TODO read from config
+
+    def _is_live_log(self, dirpart: str, fname: str) -> bool:
+        if dirpart != "logs":
+            return False
+        return fname in self._LIVE_LOG_NAMES or fname.startswith("onemon")
+
+    async def _copy_with_live(self, live_broker, task_id: str):
+        """Copy file to disk while feeding chunks to the live broker."""
+        if self.max_upload_size:
+            self.fd = WriteLimiter(self.fd, self.max_upload_size)
+        try:
+            while True:
+                buf = await self.reader.read(2048)
+                if buf == b"":
+                    break
+                self.fd.write(buf)
+                try:
+                    live_broker.feed_raw(task_id, buf)
+                except Exception:
+                    pass  # live streaming is best-effort
+        finally:
+            self.fd.flush()
 
     async def handle(self):
         dir_fname = await self.reader.readline()
@@ -206,8 +234,18 @@ class FileUpload(ProtocolHandler):
 
             raise CancelResult(f"Unhandled error: {e}")
 
+        use_live = (
+            self.live_broker is not None
+            and self._is_live_log(dirpart, fname)
+        )
+
         try:
-            await copy_to_fd(self.reader, self.fd, self.max_upload_size, readsize=2048)
+            if use_live:
+                await self._copy_with_live(self.live_broker, self.task.task_id)
+            else:
+                await copy_to_fd(
+                    self.reader, self.fd, self.max_upload_size, readsize=2048
+                )
         except MaxBytesWritten as e:
             raise CancelResult(
                 f"Task {self.task.task_id} file upload {dirpart}/{fname!r}"
@@ -231,6 +269,9 @@ class ScreenshotUpload(ProtocolHandler):
     # screenshot upload. This can be circumvented, it is purely meant as a
     # simple check.
     JPEG_HEADER = b"\xff\xd8"
+
+    # Injected by startup when the LiveEventBroker is available
+    live_broker = None
 
     def init(self):
         # Screenshots must always be jpg (can be lossy compressed) and should
@@ -284,6 +325,14 @@ class ScreenshotUpload(ProtocolHandler):
                 newfile=fname,
                 size=bytes_to_human(self.fd.tell()),
             )
+            # Notify live broker (best-effort)
+            if self.live_broker:
+                try:
+                    self.live_broker.notify_screenshot(
+                        self.task.task_id, fname, self.task.ts
+                    )
+                except Exception:
+                    pass
 
 
 class _MappedTask:

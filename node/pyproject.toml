@@ -13,7 +13,8 @@ dependencies = [
      "Cuckoo-common>=0.1.0",
      "Cuckoo-machineries>=0.1.0",
      "aiohttp>=3.10.2",
-     "aiohttp-sse>=2.1.0, <2.3"
+     "aiohttp-sse>=2.1.0, <2.3",
+     "websockify>=0.10.0"
 ]
 classifiers=[
     "Development Status :: 4 - Beta",

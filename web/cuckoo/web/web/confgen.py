@@ -39,10 +39,20 @@ upstream _uwsgi_cuckoo_web {{
     server 127.0.0.1:9090;
 }}
 
+# Node webapi (aiohttp) — adjust host:port if using distributed nodes
+upstream _cuckoo_node_api {{
+    server 127.0.0.1:8090;
+}}
+
+# websockify — VNC WebSocket proxy
+upstream _cuckoo_vnc_ws {{
+    server 127.0.0.1:6080;
+}}
+
 server {{
     listen 127.0.0.1:8000;
 
-    # Directly serve the static files for Cuckoo web. Copy 
+    # Directly serve the static files for Cuckoo web. Copy
     # (and update these after Cuckoo updates) these by running:
     # 'cuckoo web djangocommand collectstatic'. The path after alias should
     # be the same path as STATIC_ROOT. These files can be cached. Be sure
@@ -50,7 +60,29 @@ server {{
     location /static {{
         alias {static_root};
     }}
-    
+
+    # WebSocket proxy for live telemetry (/ws/live/<node>/<task_id>?token=...)
+    # Proxied to the node webapi /task/<task_id>/ws endpoint.
+    location ~ ^/ws/live/[^/]+/(.+)$ {{
+        proxy_pass http://_cuckoo_node_api/task/$1/ws$is_args$args;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 3600s;
+    }}
+
+    # WebSocket proxy for noVNC (/ws/vnc/<node>/<vnc_token>)
+    # Proxied to websockify which maps tokens to QEMU VNC ports.
+    location ~ ^/ws/vnc/[^/]+/(.+)$ {{
+        proxy_pass http://_cuckoo_vnc_ws/$1;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 3600s;
+    }}
+
     # Pass any non-static requests to the Cuckoo web wsgi application run
     # by uwsgi. It is not recommended to cache paths here, this can cause
     # the UI to no longer reflect the correct state of analyses and tasks.

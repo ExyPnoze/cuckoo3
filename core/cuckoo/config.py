@@ -62,6 +62,16 @@ typeloaders = {
             "min_file_size": config.Int(default_val=133, min_value=1),
             "max_file_size": config.Int(default_val=4294967296, min_value=1),
         },
+        "live": {
+            "secret": config.String(
+                sensitive=True,
+                default_val=token_hex(32),
+                allow_empty=False,
+            ),
+            "vnc_ws_port": config.Int(
+                default_val=0, required=False, min_value=0, max_value=65535
+            ),
+        },
     },
     "distributed.yaml": {
         "remote_nodes": config.NestedDictionary(

@@ -13,6 +13,7 @@ from cuckoo.common.log import CuckooGlobalLogger
 from cuckoo.common.importing import ZippedNodeWork, AnalysisImportError
 from cuckoo.common.machines import serialize_machinelists
 from cuckoo.common.config import cfg
+from cuckoo.common.livejwt import verify_token, LiveJWTError
 from cuckoo.common.storage import (
     random_filename,
     delete_file,
@@ -325,6 +326,91 @@ class API:
     async def get_node_state(self, request):
         return web.json_response({"state": self.ctx.node.state})
 
+    async def get_task_vnc_token(self, request):
+        """POST /task/{task_id}/vnc-token
+        Ask the node for the VNC token of a running task.
+        Also registers the token with the websockify VNC proxy.
+        Returns {vnc_port, vnc_token} or 404/409 on error."""
+        task_id = request.match_info["task_id"]
+        try:
+            vnc_port, vnc_token = self.ctx.node.get_vnc_info(task_id)
+        except Exception as e:
+            return web.json_response(
+                {"error": f"Could not retrieve VNC info: {e}"}, status=404
+            )
+
+        if not vnc_port or not vnc_token:
+            return web.json_response(
+                {"error": "VNC not configured or machine not running"}, status=409
+            )
+
+        # Register with the VNC proxy token manager if available
+        vnc_mgr = getattr(self.ctx, "vnc_token_manager", None)
+        if vnc_mgr:
+            vnc_mgr.add(task_id, vnc_port, vnc_token)
+
+        return web.json_response({"vnc_port": vnc_port, "vnc_token": vnc_token})
+
+    async def delete_task_vnc_token(self, request):
+        """DELETE /task/{task_id}/vnc-token
+        Invalidate (rotate) the VNC token for a running task."""
+        task_id = request.match_info["task_id"]
+        try:
+            self.ctx.node.rotate_vnc_token(task_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=404)
+        return web.Response()
+
+    async def task_live_ws(self, request):
+        """GET /task/{task_id}/ws
+        WebSocket endpoint for live telemetry events.
+        Auth: ?token=<JWT> (issued by the web API live session view).
+        """
+        task_id = request.match_info["task_id"]
+
+        # Validate JWT token from query parameter
+        token = request.rel_url.query.get("token", "")
+        if not token:
+            return web.HTTPUnauthorized(reason="Missing token")
+
+        try:
+            secret = cfg("cuckoo.yaml", "cuckoo", "live", "secret")
+            payload = verify_token(token, secret)
+        except LiveJWTError as e:
+            return web.HTTPUnauthorized(reason=str(e))
+
+        if payload.get("task_id") != task_id:
+            return web.HTTPForbidden(reason="Token not valid for this task")
+
+        live_broker = getattr(self.ctx, "live_broker", None)
+        if live_broker is None:
+            return web.HTTPServiceUnavailable(reason="Live broker not available")
+
+        ws = web.WebSocketResponse(heartbeat=20)
+        await ws.prepare(request)
+
+        q = await live_broker.subscribe(task_id)
+        try:
+            while not ws.closed:
+                try:
+                    payload_str = await asyncio.wait_for(q.get(), timeout=30)
+                    await ws.send_str(payload_str)
+                    q.task_done()
+                except asyncio.TimeoutError:
+                    # Send a heartbeat ping to keep connection alive
+                    try:
+                        await ws.ping()
+                    except Exception:
+                        break
+                except Exception:
+                    break
+        finally:
+            await live_broker.unsubscribe(task_id, q)
+            if not ws.closed:
+                await ws.close()
+
+        return ws
+
 
 class APIRunner:
     def __init__(self, runner, loop, statesse):
@@ -376,6 +462,19 @@ def make_api_runner(nodectx):
                 api.delete_analysis_work,
             ),
             web.get("/state", api.get_node_state),
+            # Live view endpoints
+            web.post(
+                f"/task/{{task_id:{TASK_ID_REGEX}}}/vnc-token",
+                api.get_task_vnc_token,
+            ),
+            web.delete(
+                f"/task/{{task_id:{TASK_ID_REGEX}}}/vnc-token",
+                api.delete_task_vnc_token,
+            ),
+            web.get(
+                f"/task/{{task_id:{TASK_ID_REGEX}}}/ws",
+                api.task_live_ws,
+            ),
         ]
     )
 

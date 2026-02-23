@@ -1,0 +1,211 @@
+{% extends "base.html.jinja2" %}
+
+{% block page_styles %}
+<style>
+  .live-layout {
+    display: flex;
+    gap: 1rem;
+    padding: 1rem;
+    height: calc(100vh - 120px);
+    box-sizing: border-box;
+  }
+
+  /* Left: VNC panel */
+  .live-vnc-panel {
+    flex: 0 0 60%;
+    display: flex;
+    flex-direction: column;
+    background: #111;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .live-vnc-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.8rem;
+    background: #222;
+    color: #ccc;
+    font-size: 0.8rem;
+  }
+
+  #vnc-status {
+    margin-left: auto;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-weight: bold;
+  }
+  #vnc-status.connecting { background: #665500; color: #ffcc00; }
+  #vnc-status.connected  { background: #005522; color: #44ee88; }
+  #vnc-status.error      { background: #550000; color: #ff6666; }
+  #vnc-status.unavailable { background: #333; color: #888; }
+
+  #vnc-canvas-container {
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+  }
+
+  #vnc-canvas-container canvas {
+    max-width: 100%;
+    max-height: 100%;
+    display: block;
+  }
+
+  /* Right: telemetry panels */
+  .live-tele-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    overflow: hidden;
+  }
+
+  .tele-section {
+    display: flex;
+    flex-direction: column;
+    background: #1a1a2e;
+    border-radius: 4px;
+    overflow: hidden;
+    flex: 1;
+  }
+
+  .tele-section-header {
+    background: #16213e;
+    color: #e0e0e0;
+    padding: 0.3rem 0.7rem;
+    font-size: 0.8rem;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .tele-count {
+    background: #0f3460;
+    color: #ccc;
+    border-radius: 10px;
+    padding: 1px 6px;
+    font-size: 0.7rem;
+  }
+
+  .tele-list {
+    overflow-y: auto;
+    flex: 1;
+    padding: 0.2rem 0;
+    font-family: monospace;
+    font-size: 0.72rem;
+  }
+
+  .tele-item {
+    padding: 2px 0.7rem;
+    border-bottom: 1px solid #222;
+    color: #ccc;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .tele-item:hover { background: #243050; }
+  .tele-item .ev-pid  { color: #64b5f6; }
+  .tele-item .ev-call { color: #81c784; }
+  .tele-item .ev-path { color: #ffb74d; }
+  .tele-item .ev-net  { color: #ce93d8; }
+  .tele-item .ev-reg  { color: #f48fb1; }
+
+  /* Status bar */
+  #live-status-bar {
+    padding: 0.3rem 1rem;
+    background: #222;
+    color: #888;
+    font-size: 0.75rem;
+    display: flex;
+    gap: 1.5rem;
+  }
+
+  #ws-indicator {
+    font-weight: bold;
+  }
+  #ws-indicator.connected { color: #44ee88; }
+  #ws-indicator.connecting { color: #ffcc00; }
+  #ws-indicator.disconnected { color: #ff6666; }
+</style>
+{% endblock %}
+
+{% block body %}
+<div id="live-status-bar">
+  <span>Analysis: <strong>{{ analysis_id }}</strong></span>
+  <span>Task: <strong>{{ task_id }}</strong></span>
+  <span>Telemetry: <span id="ws-indicator" class="connecting">connecting…</span></span>
+  <span id="event-count-total">Events: 0</span>
+  <span id="live-ended-notice" style="display:none;color:#ff6666;font-weight:bold;">
+    &#9632; Task ended
+  </span>
+</div>
+
+<div class="live-layout">
+
+  <!-- VNC panel -->
+  <div class="live-vnc-panel">
+    <div class="live-vnc-toolbar">
+      <span>Live VM view (noVNC)</span>
+      <span id="vnc-status" class="unavailable">unavailable</span>
+    </div>
+    <div id="vnc-canvas-container">
+      <div id="vnc-placeholder" style="color:#555;font-size:0.85rem;text-align:center;">
+        Loading VNC…
+      </div>
+    </div>
+  </div>
+
+  <!-- Telemetry panel -->
+  <div class="live-tele-panel">
+
+    <div class="tele-section" style="flex:2">
+      <div class="tele-section-header">
+        Process tree / API calls
+        <span class="tele-count" id="cnt-process">0</span>
+      </div>
+      <div class="tele-list" id="list-process"></div>
+    </div>
+
+    <div class="tele-section" style="flex:1.5">
+      <div class="tele-section-header">
+        Network
+        <span class="tele-count" id="cnt-network">0</span>
+      </div>
+      <div class="tele-list" id="list-network"></div>
+    </div>
+
+    <div class="tele-section">
+      <div class="tele-section-header">
+        Files
+        <span class="tele-count" id="cnt-file">0</span>
+      </div>
+      <div class="tele-list" id="list-file"></div>
+    </div>
+
+    <div class="tele-section">
+      <div class="tele-section-header">
+        Registry
+        <span class="tele-count" id="cnt-registry">0</span>
+      </div>
+      <div class="tele-list" id="list-registry"></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  window.LIVE_ANALYSIS_ID = {{ analysis_id|tojson }};
+  window.LIVE_TASK_ID     = {{ task_id|tojson }};
+  window.LIVE_API_BASE    = "/api/analysis/" + window.LIVE_ANALYSIS_ID + "/task/" + window.LIVE_TASK_ID;
+</script>
+<script src="{{ static('js/live.js') }}"></script>
+{% endblock %}

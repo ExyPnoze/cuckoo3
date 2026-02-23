@@ -2,6 +2,7 @@
 # See the file 'LICENSE' for copying permission.
 
 import os
+import secrets
 import subprocess
 import time
 import json
@@ -123,6 +124,10 @@ class _QEMUMachine:
         self.process = None
         self.qmp = None
 
+        # VNC: port (0 = disabled) and one-time password set via QMP
+        self.vnc_port = machine.vnc_port
+        self.vnc_token = ""
+
         self._lock = RLock()
 
     def snapshot_determine_compression(self):
@@ -242,6 +247,12 @@ def _make_command(qemu_machine, emulator_path, disposable_disk_path, emulator_ve
     command.extend(
         ["-qmp", f"unix:{qemu_machine.qmp_sockpath},server,nowait", "-monitor", "none"]
     )
+
+    # VNC: bind on localhost only, require password (set via QMP after start)
+    if qemu_machine.vnc_port > 0:
+        # QEMU VNC display number = port - 5900
+        display = qemu_machine.vnc_port - 5900
+        command.extend(["-vnc", f"127.0.0.1:{display},password"])
     # The memory snapshot might be compressed. See if the compressed was
     # recognized and we can decompress it. Create a command that results
     # in the decompressed memory being fed to the qemu -incoming argument.
@@ -508,9 +519,16 @@ class QEMU(Machinery):
             architecture=values["architecture"],
             interface=values["interface"] or self.cfg.get("interface"),
             agent_port=values["agent_port"],
+            vnc_port=values.get("vnc_port", 0),
             mac_address=values["mac_address"],
             machinery=self,
         )
+
+    def get_vnc_info(self, machine):
+        """Return (vnc_port, vnc_token) for the given machine, or (0, '') if
+        VNC is not configured or the machine is not currently running."""
+        vm = self._get_vm(machine.name)
+        return vm.vnc_port, vm.vnc_token
 
     def state(self, machine):
         vm = self._get_vm(machine.name)
@@ -646,6 +664,26 @@ class QEMU(Machinery):
 
             tries += 1
             time.sleep(1)
+
+        # If VNC is enabled, set a one-time random password via QMP
+        if vm.vnc_port > 0:
+            vnc_token = secrets.token_hex(16)
+            try:
+                vm.qmp.execute(
+                    "change-vnc-password", {"password": vnc_token}
+                )
+                vm.vnc_token = vnc_token
+                log.debug(
+                    "VNC password set for machine",
+                    machine=machine.name,
+                    vnc_port=vm.vnc_port,
+                )
+            except QMPError as e:
+                log.warning(
+                    "Failed to set VNC password via QMP. VNC may be inaccessible.",
+                    machine=machine.name,
+                    error=e,
+                )
 
     def stop(self, machine):
         """Stop the qemu vm by sending a quit command. Sends sigkill if
