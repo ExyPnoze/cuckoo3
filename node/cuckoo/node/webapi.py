@@ -35,6 +35,10 @@ MAX_UPLOAD_SIZE = 1024 * 1024 * 1024
 
 @web.middleware
 async def check_token(request, handler):
+    # WebSocket live endpoint authenticates via JWT query param, not Token header
+    if request.path.endswith("/ws"):
+        return await handler(request)
+
     token_key = request.headers.get("Authorization")
     if not token_key:
         return web.HTTPUnauthorized()
@@ -374,7 +378,7 @@ class API:
             return web.HTTPUnauthorized(reason="Missing token")
 
         try:
-            secret = cfg("cuckoo.yaml", "cuckoo", "live", "secret")
+            secret = cfg("cuckoo.yaml", "live", "secret")
             payload = verify_token(token, secret)
         except LiveJWTError as e:
             return web.HTTPUnauthorized(reason=str(e))

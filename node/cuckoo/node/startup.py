@@ -273,7 +273,7 @@ def start_local(stream_receiver, loglevel, api_host="localhost", api_port=8090):
 
     # Run the aiohttp event loop in a background thread so the caller
     # (main scheduler) can continue in the foreground.
-    api_thread = Thread(target=runner.run, daemon=True, name="node-webapi")
+    api_thread = Thread(target=runner.run_forever, daemon=True, name="node-webapi")
     api_thread.start()
 
     return ctx
