@@ -86,9 +86,8 @@ class WebsockifyProcess:
             cmd = [
                 "websockify",
                 f"0.0.0.0:{self._listen_port}",
-                f"--token-plugin=TokenFile",
+                "--token-plugin=TokenFile",
                 f"--token-source={self._token_file}",
-                "--ssl-only=false",
                 "--heartbeat=30",
             ]
             try:

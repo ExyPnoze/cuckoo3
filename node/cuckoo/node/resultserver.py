@@ -186,8 +186,9 @@ class FileUpload(ProtocolHandler):
     # Pattern matching behavioural log files we want to stream live
     _LIVE_LOG_NAMES = ("onemon.json", "onemon.pb", "onemon")
 
-    # Injected by startup when the LiveEventBroker is available
-    live_broker = None
+    # Injected by startup: a multiprocessing.Queue shared with the main
+    # process so that live data can cross the process boundary.
+    live_queue = None
 
     def init(self):
         self.max_upload_size = 1024 * 1024 * 128  # TODO read from config
@@ -197,8 +198,8 @@ class FileUpload(ProtocolHandler):
             return False
         return fname in self._LIVE_LOG_NAMES or fname.startswith("onemon")
 
-    async def _copy_with_live(self, live_broker, task_id: str):
-        """Copy file to disk while feeding chunks to the live broker."""
+    async def _copy_with_live(self, live_queue, task_id: str):
+        """Copy file to disk while feeding chunks to the live queue."""
         if self.max_upload_size:
             self.fd = WriteLimiter(self.fd, self.max_upload_size)
         try:
@@ -208,7 +209,7 @@ class FileUpload(ProtocolHandler):
                     break
                 self.fd.write(buf)
                 try:
-                    live_broker.feed_raw(task_id, buf)
+                    live_queue.put_nowait(("raw", task_id, buf))
                 except Exception:
                     pass  # live streaming is best-effort
         finally:
@@ -235,13 +236,13 @@ class FileUpload(ProtocolHandler):
             raise CancelResult(f"Unhandled error: {e}")
 
         use_live = (
-            self.live_broker is not None
+            self.live_queue is not None
             and self._is_live_log(dirpart, fname)
         )
 
         try:
             if use_live:
-                await self._copy_with_live(self.live_broker, self.task.task_id)
+                await self._copy_with_live(self.live_queue, self.task.task_id)
             else:
                 await copy_to_fd(
                     self.reader, self.fd, self.max_upload_size, readsize=2048
@@ -270,8 +271,8 @@ class ScreenshotUpload(ProtocolHandler):
     # simple check.
     JPEG_HEADER = b"\xff\xd8"
 
-    # Injected by startup when the LiveEventBroker is available
-    live_broker = None
+    # Injected by startup: a multiprocessing.Queue shared with the main process.
+    live_queue = None
 
     def init(self):
         # Screenshots must always be jpg (can be lossy compressed) and should
@@ -325,11 +326,11 @@ class ScreenshotUpload(ProtocolHandler):
                 newfile=fname,
                 size=bytes_to_human(self.fd.tell()),
             )
-            # Notify live broker (best-effort)
-            if self.live_broker:
+            # Notify live queue (best-effort)
+            if self.live_queue:
                 try:
-                    self.live_broker.notify_screenshot(
-                        self.task.task_id, fname, self.task.ts
+                    self.live_queue.put_nowait(
+                        ("screenshot", self.task.task_id, fname, self.task.ts)
                     )
                 except Exception:
                     pass
@@ -530,19 +531,31 @@ class _RSResponses:
 
 class ResultServer(UnixSocketServer):
     def __init__(
-        self, unix_sock_path, cuckoo_cwd, listen_ip, listen_port, loglevel=logging.DEBUG
+        self,
+        unix_sock_path,
+        cuckoo_cwd,
+        listen_ip,
+        listen_port,
+        loglevel=logging.DEBUG,
+        live_queue=None,
     ):
         super().__init__(unix_sock_path)
         self.cuckoocwd = cuckoo_cwd
         self.listen_ip = listen_ip
         self.listen_port = listen_port
         self.loglevel = loglevel
+        self._live_queue = live_queue
 
         self._rs = None
 
     def init(self):
         cuckoocwd.set(self.cuckoocwd.root, analyses_dir=self.cuckoocwd.analyses)
         register_shutdown(self.stop)
+
+        # Inject the shared queue so handlers can put events in it.
+        if self._live_queue is not None:
+            FileUpload.live_queue = self._live_queue
+            ScreenshotUpload.live_queue = self._live_queue
 
         init_global_logging(
             self.loglevel, Paths.log("resultserver.log"), use_logqueue=False

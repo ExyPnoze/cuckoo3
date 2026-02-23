@@ -141,7 +141,7 @@ def start_machinerymanager(nodectx):
 
 def start_resultserver(nodectx):
     from cuckoo.node.resultserver import ResultServer, servers
-    from multiprocessing import Process
+    from multiprocessing import Process, Queue
 
     sockpath = UnixSocketPaths.result_server()
     if sockpath.exists():
@@ -153,7 +153,16 @@ def start_resultserver(nodectx):
 
     ip = config.cfg("cuckoo", "resultserver", "listen_ip")
     port = config.cfg("cuckoo", "resultserver", "listen_port")
-    rs = ResultServer(sockpath, cuckoocwd, ip, port, loglevel=nodectx.loglevel)
+
+    # Create a multiprocessing queue so the RS subprocess can send live
+    # events to the main process without sharing object references.
+    live_queue = Queue()
+    nodectx.live_queue = live_queue
+
+    rs = ResultServer(
+        sockpath, cuckoocwd, ip, port,
+        loglevel=nodectx.loglevel, live_queue=live_queue,
+    )
     log.debug(
         "Starting resultserver.",
         listenip=ip,
@@ -197,6 +206,7 @@ class NodeCtx:
         self.is_resetting = False
         # Live view components (optional)
         self.live_broker = None
+        self.live_queue = None  # multiprocessing.Queue bridging RS subprocess
         self.vnc_token_manager = None
         self.websockify_process = None
 
@@ -207,9 +217,9 @@ def start_live_components(ctx, api_loop=None):
     This function is best-effort: if websockify is missing or VNC is not
     configured, the rest of Cuckoo keeps working normally.
     """
+    import queue as _queue_mod
     from cuckoo.node.live import LiveEventBroker
     from cuckoo.node.vncproxy import VNCTokenManager, WebsockifyProcess
-    from cuckoo.node.resultserver import FileUpload, ScreenshotUpload
 
     broker = LiveEventBroker()
     if api_loop:
@@ -217,15 +227,35 @@ def start_live_components(ctx, api_loop=None):
 
     ctx.live_broker = broker
 
-    # Inject broker into the result server protocol handlers so they can
-    # stream events during file uploads.  These are class-level attributes
-    # so they work across all handler instances.
-    FileUpload.live_broker = broker
-    ScreenshotUpload.live_broker = broker
+    # Drain the multiprocessing.Queue that the ResultServer subprocess writes
+    # to, and forward events to the broker (which is in this process).
+    live_queue = getattr(ctx, "live_queue", None)
+    if live_queue is not None and api_loop is not None:
+        def _drain_queue():
+            while True:
+                try:
+                    msg = live_queue.get(timeout=1)
+                except _queue_mod.Empty:
+                    continue
+                except Exception:
+                    break
+                try:
+                    if msg[0] == "raw":
+                        broker.feed_raw(msg[1], msg[2])
+                    elif msg[0] == "screenshot":
+                        broker.notify_screenshot(msg[1], msg[2], msg[3])
+                except Exception:
+                    pass  # best-effort
+
+        drain_th = Thread(target=_drain_queue, daemon=True, name="live-queue-drain")
+        drain_th.start()
+        log.debug("Live queue drain thread started.")
+    else:
+        log.debug("Live queue drain not started (no queue or no event loop).")
 
     # VNC token file and websockify (optional, only if port is configured)
     try:
-        vnc_ws_port = config.cfg("cuckoo.yaml", "cuckoo", "live", "vnc_ws_port")
+        vnc_ws_port = config.cfg("cuckoo.yaml", "live", "vnc_ws_port")
     except Exception:
         vnc_ws_port = 0
 
