@@ -244,7 +244,9 @@ def start_live_components(ctx, api_loop=None):
         )
 
 
-def start_local(stream_receiver, loglevel):
+def start_local(stream_receiver, loglevel, api_host="localhost", api_port=8090):
+    from cuckoo.node.webapi import make_api_runner
+
     ctx = NodeCtx()
     ctx.loglevel = loglevel
     # Results should not be zipped if it is a local node.
@@ -253,12 +255,27 @@ def start_local(stream_receiver, loglevel):
     start_resultserver(ctx)
     start_machinerymanager(ctx)
     start_taskrunner(ctx)
+
+    runner = make_api_runner(ctx)
+    shutdown.register_shutdown(runner.stop)
     node = Node(ctx, stream_receiver)
     ctx.node = node
     shutdown.register_shutdown(node.stop)
     node.start()
-    start_live_components(ctx)
+
+    try:
+        runner.create_site(host=api_host, port=api_port)
+    except OSError as e:
+        raise StartupError(e)
+
+    start_live_components(ctx, api_loop=runner.loop)
     start_nodestatecontrol(ctx, threaded=True)
+
+    # Run the aiohttp event loop in a background thread so the caller
+    # (main scheduler) can continue in the foreground.
+    api_thread = Thread(target=runner.run, daemon=True, name="node-webapi")
+    api_thread.start()
+
     return ctx
 
 

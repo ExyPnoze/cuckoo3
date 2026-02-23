@@ -117,7 +117,7 @@ class LiveSessionView(APIView):
                 api_key = ""
 
         # Issue JWT
-        secret = cfg("cuckoo.yaml", "cuckoo", "live", "secret")
+        secret = cfg("cuckoo.yaml", "live", "secret")
         ttl = 3600
         jwt = issue_token(task_id, secret, ttl=ttl)
         expires_at = int(time.time()) + ttl
