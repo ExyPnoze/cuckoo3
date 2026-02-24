@@ -184,7 +184,7 @@ class WriteLimiter:
 
 class FileUpload(ProtocolHandler):
     # Pattern matching behavioural log files we want to stream live
-    _LIVE_LOG_NAMES = ("onemon.json", "onemon.pb", "onemon")
+    _LIVE_LOG_NAMES = ("onemon.json", "onemon.pb", "onemon", "threemon.pb")
 
     # Injected by startup: a multiprocessing.Queue shared with the main
     # process so that live data can cross the process boundary.
@@ -196,7 +196,11 @@ class FileUpload(ProtocolHandler):
     def _is_live_log(self, dirpart: str, fname: str) -> bool:
         if dirpart != "logs":
             return False
-        return fname in self._LIVE_LOG_NAMES or fname.startswith("onemon")
+        return (
+            fname in self._LIVE_LOG_NAMES
+            or fname.startswith("onemon")
+            or fname.startswith("threemon")
+        )
 
     async def _copy_with_live(self, live_queue, task_id: str):
         """Copy file to disk while feeding chunks to the live queue."""

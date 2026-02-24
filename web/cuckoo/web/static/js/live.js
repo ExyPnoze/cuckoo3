@@ -65,13 +65,13 @@
     const d = evt.data || {};
 
     if (t === "task_ended") {
-      setWsStatus("disconnected", "task ended — redirecting…");
+      setWsStatus("disconnected", "task ended");
       setVncStatus("error", "task ended");
       if (ws) ws.close();
       if (rfb) rfb.disconnect();
-      setTimeout(() => {
-        window.location.href = "/analysis/" + analysisId + "/task/" + taskId;
-      }, 2000);
+      const notice = el("live-ended-notice");
+      notice.style.display = "";
+      notice.innerHTML = 'Task finished. <a href="/analysis/' + analysisId + '/task/' + taskId + '" class="button is-small">View Report</a>';
       return;
     }
 
