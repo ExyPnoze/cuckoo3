@@ -25,7 +25,10 @@ def start_taskrunner(nodectx):
     if sockpath.exists():
         raise StartupError(f"Task runner socket path already exists: {sockpath}")
 
-    taskrunner = TaskRunner(sockpath, cuckoocwd, loglevel=nodectx.loglevel)
+    taskrunner = TaskRunner(
+        sockpath, cuckoocwd, loglevel=nodectx.loglevel,
+        live_queue=getattr(nodectx, "live_queue", None),
+    )
     runner_proc = Process(target=taskrunner.start)
 
     def _taskrunner_stopper():
@@ -244,6 +247,9 @@ def start_live_components(ctx, api_loop=None):
                         broker.feed_raw(msg[1], msg[2])
                     elif msg[0] == "screenshot":
                         broker.notify_screenshot(msg[1], msg[2], msg[3])
+                    elif msg[0] == "task_ended":
+                        broker.notify_task_ended(msg[1])
+                        broker.cleanup_task(msg[1])
                 except Exception:
                     pass  # best-effort
 

@@ -61,6 +61,11 @@
             <a role="tab" href="#report" class="tabbar-link is-active"><strong>Task</strong></a>
             <a role="tab" href="#settings" class="tabbar-link">Settings</a>
             <a role="tab" href="#machine" class="tabbar-link">Machine</a>
+            {% if task.state == 'running' %}
+              <a href="{{ url('task_live', args=[analysis.id, task.id]) }}" class="tabbar-link" style="margin-left: auto; color: green;">
+                <i class="fas fa-circle-notch fa-spin"></i> Live
+              </a>
+            {% endif %}
           </div>
 
           {% if debug_template_data %}

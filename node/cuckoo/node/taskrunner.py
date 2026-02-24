@@ -50,11 +50,13 @@ class _FlowRunner(Thread):
         machine,
         resultserver,
         rooter_sock_path=None,
+        live_queue=None,
     ):
         super().__init__()
         self.taskflow_cls = taskflow_cls
         self.machine = machine
         self.resultserver = resultserver
+        self._live_queue = live_queue
 
         self.task = Task.from_file(TaskPaths.taskjson(task_id))
         self.analysis = Analysis.from_file(AnalysisPaths.analysisjson(analysis_id))
@@ -212,6 +214,13 @@ class _FlowRunner(Thread):
             self.task_failed()
         self.taskflow.log.close()
 
+        # Notify live subscribers that this task has ended
+        if self._live_queue is not None:
+            try:
+                self._live_queue.put_nowait(("task_ended", self.task.id))
+            except Exception:
+                pass
+
     def run_steps(self):
         self.taskflow.log.debug(
             "Asking resultserver to map for IP to task", ip=self.machine.ip
@@ -273,11 +282,12 @@ class TaskRunner(UnixSocketServer):
 
     _MIN_KEYS = {"task_id", "analysis_id", "kind", "resultserver", "machine"}
 
-    def __init__(self, sockpath, cuckoocwd, loglevel=logging.DEBUG):
+    def __init__(self, sockpath, cuckoocwd, loglevel=logging.DEBUG, live_queue=None):
         super().__init__(sockpath)
 
         self.cuckoocwd = cuckoocwd
         self.loglevel = loglevel
+        self._live_queue = live_queue
 
         self.active_flows = []
         self.responses = []
@@ -297,7 +307,8 @@ class TaskRunner(UnixSocketServer):
             m = Machine.from_dict(machine)
             rs = ExistingResultServer.from_dict(resultserver)
             flowrunner = _FlowRunner(
-                taskflow_cls, task_id, analysis_id, m, rs, rooter_sock_path
+                taskflow_cls, task_id, analysis_id, m, rs, rooter_sock_path,
+                live_queue=self._live_queue,
             )
         except Exception as e:
             log.exception("Failure during task flow runner initialization", error=e)

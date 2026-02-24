@@ -10,7 +10,6 @@ distributes JSON-serialised events to all active WebSocket subscribers.
 
 import asyncio
 import json
-import struct
 import threading
 from collections import defaultdict
 
@@ -18,105 +17,80 @@ from cuckoo.common.log import CuckooGlobalLogger
 
 log = CuckooGlobalLogger(__name__)
 
-# Protobuf tag/wire-type constants for onemon length-delimited framing.
-# Each record is prefixed with a varint giving the byte length of the
-# protobuf message that follows.  We only need the framing logic here;
-# full protobuf decoding is done lazily (or left to consumers that have
-# the generated _pb2 modules available).
 _MAX_EVENT_BYTES = 1024 * 1024  # 1 MB safety cap per event
 
-
-def _read_varint(buf: bytes, pos: int):
-    """Read a protobuf-style varint from buf starting at pos.
-    Returns (value, new_pos) or (None, pos) if not enough bytes."""
-    result = 0
-    shift = 0
-    while pos < len(buf):
-        b = buf[pos]
-        pos += 1
-        result |= (b & 0x7F) << shift
-        if not (b & 0x80):
-            return result, pos
-        shift += 7
-        if shift > 63:
-            return None, pos  # overflow protection
-    return None, pos  # incomplete
+# Threemon event kind byte -> (friendly_name, pb2_module_attr, pb2_class_name)
+_KIND_MAP = {
+    1:  ("process",  "process_pb2",  "Process"),
+    2:  ("registry", "registry_pb2", "Registry"),
+    8:  ("file",     "file_pb2",     "File"),
+    12: ("network",  "network_pb2",  "NetworkFlow"),
+    6:  ("inject",   "inject_pb2",   "Inject"),
+    9:  ("mutant",   "mutant_pb2",   "Mutant"),
+}
 
 
 class _TaskBuffer:
-    """Per-task incremental parse buffer for the onemon protobuf stream."""
+    """Per-task incremental parse buffer for the threemon binary stream.
+
+    Each record in the stream is:
+        header[0..2]  : 3-byte little-endian data size
+        header[3]     : 1-byte event kind
+        data[0..size] : protobuf-encoded event body
+    """
 
     def __init__(self):
         self._buf = b""
 
     def feed(self, chunk: bytes):
-        """Feed a raw chunk; return list of complete raw protobuf messages."""
+        """Feed a raw chunk; return list of (kind, data) tuples."""
         self._buf += chunk
         messages = []
         pos = 0
-        while pos < len(self._buf):
-            length, new_pos = _read_varint(self._buf, pos)
-            if length is None:
-                # Not enough bytes for the length prefix yet
-                break
-            if length > _MAX_EVENT_BYTES:
-                log.warning("Onemon event too large, resetting buffer", size=length)
+        while pos + 4 <= len(self._buf):
+            header = self._buf[pos:pos + 4]
+            data_size = header[0] + header[1] * 256 + header[2] * 65536
+            kind = header[3]
+
+            if data_size > _MAX_EVENT_BYTES:
+                log.warning(
+                    "Threemon event too large, resetting buffer", size=data_size
+                )
                 self._buf = b""
                 return messages
-            if new_pos + length > len(self._buf):
-                # Message body not fully received yet
-                break
-            messages.append(self._buf[new_pos : new_pos + length])
-            pos = new_pos + length
+
+            if pos + 4 + data_size > len(self._buf):
+                break  # incomplete message, wait for more data
+
+            messages.append((kind, self._buf[pos + 4: pos + 4 + data_size]))
+            pos += 4 + data_size
+
         self._buf = self._buf[pos:]
         return messages
 
 
-def _try_parse_protobuf(raw: bytes) -> dict | None:
-    """Attempt to parse a raw protobuf message into a dict for JSON delivery.
+def _parse_event(kind: int, raw: bytes):
+    """Parse a threemon protobuf event into a JSON-ready dict.
 
-    We use a best-effort approach: if the generated _pb2 modules are
-    available (from processing/), use them; otherwise fall back to a minimal
-    field extractor so telemetry still works without processing installed.
+    Returns None for unknown/unsupported kinds.
     """
-    try:
-        from cuckoo.processing.event.translate.threemon import (
-            api_pb2,
-            process_pb2,
-            network_pb2,
-            file_pb2,
-            registry_pb2,
-        )
-        # Try each known message type in order
-        for kind, cls in (
-            ("process", process_pb2.Process),
-            ("network", network_pb2.NetworkEvent),
-            ("file", file_pb2.FileEvent),
-            ("registry", registry_pb2.RegistryEvent),
-            ("api", api_pb2.ApiCall),
-        ):
-            try:
-                msg = cls()
-                msg.ParseFromString(raw)
-                # Quick sanity: protobuf always parses without error even for
-                # wrong types; check a required-ish field.
-                d = {
-                    "type": kind,
-                    "data": _proto_to_dict(msg),
-                }
-                return d
-            except Exception:
-                continue
-    except ImportError:
-        pass
+    info = _KIND_MAP.get(kind)
+    if not info:
+        return None
 
-    # Fallback: emit as base64-encoded raw bytes so the browser can still
-    # see something without the protobuf libraries installed.
-    import base64
-    return {
-        "type": "raw",
-        "data": base64.b64encode(raw).decode(),
-    }
+    kind_name, mod_attr, cls_name = info
+
+    try:
+        from cuckoo.processing.event.translate import threemon as _threemon_pkg
+        mod = getattr(_threemon_pkg, mod_attr)
+        cls = getattr(mod, cls_name)
+        msg = cls()
+        msg.ParseFromString(raw)
+        data = _proto_to_dict(msg)
+        data = _normalize(kind_name, data)
+        return {"type": kind_name, "data": data}
+    except Exception:
+        return None
 
 
 def _proto_to_dict(msg) -> dict:
@@ -128,21 +102,58 @@ def _proto_to_dict(msg) -> dict:
         return {}
 
 
+def _normalize(kind_name: str, d: dict) -> dict:
+    """Map raw protobuf field names to the field names live.js expects."""
+    if kind_name == "process":
+        return {
+            "pid":        d.get("pid"),
+            "image":      d.get("image", ""),
+            "parent_pid": d.get("ppid"),
+            "command":    d.get("command", ""),
+        }
+    if kind_name == "network":
+        return {
+            "src_ip":   d.get("srcip", ""),
+            "dst_ip":   d.get("dstip", ""),
+            "dst_port": d.get("dstport"),
+            "proto":    d.get("proto"),
+            "pid":      d.get("pid"),
+        }
+    if kind_name == "file":
+        return {
+            "operation": str(d.get("kind", "")),
+            "path":      d.get("srcpath", ""),
+            "pid":       d.get("pid"),
+        }
+    if kind_name == "registry":
+        return {
+            "operation": str(d.get("kind", "")),
+            "path":      d.get("path", ""),
+            "pid":       d.get("pid"),
+        }
+    if kind_name == "inject":
+        return {
+            "pid":    d.get("srcpid"),
+            "dstpid": d.get("dstpid"),
+            "image":  f"inject→{d.get('dstpid', '?')}",
+        }
+    return d
+
+
 class LiveEventBroker:
     """Central broker that receives raw data from the result server and
     distributes parsed events to WebSocket subscribers.
 
-    Thread-safety: feed_raw/notify_screenshot may be called from the result
-    server asyncio loop; subscribe/unsubscribe are called from the webapi
-    asyncio loop.  Both sides use asyncio.run_coroutine_threadsafe() to
-    post to the single asyncio event loop owned by the webapi.
+    Thread-safety: feed_raw/notify_screenshot may be called from the drain
+    thread; subscribe/unsubscribe are called from the webapi asyncio loop.
+    Both sides use asyncio.run_coroutine_threadsafe() to post to the single
+    asyncio event loop owned by the webapi.
     """
 
     def __init__(self):
-        # asyncio loop owned by the webapi (set in attach_loop())
         self._loop: asyncio.AbstractEventLoop | None = None
 
-        # Per-task parse buffers (written from resultserver thread-context)
+        # Per-task parse buffers
         self._buffers: dict[str, _TaskBuffer] = defaultdict(_TaskBuffer)
         self._buf_lock = threading.Lock()
 
@@ -154,7 +165,7 @@ class LiveEventBroker:
         self._loop = loop
 
     # ------------------------------------------------------------------
-    # Called from resultserver context (may be a different thread/process)
+    # Called from drain thread context
     # ------------------------------------------------------------------
 
     def feed_raw(self, task_id: str, chunk: bytes):
@@ -165,8 +176,8 @@ class LiveEventBroker:
             buf = self._buffers[task_id]
             messages = buf.feed(chunk)
 
-        for raw_msg in messages:
-            event = _try_parse_protobuf(raw_msg)
+        for kind, raw in messages:
+            event = _parse_event(kind, raw)
             if event:
                 self._dispatch(task_id, event)
 
@@ -215,6 +226,6 @@ class LiveEventBroker:
                 self._subscribers.pop(task_id, None)
 
     def cleanup_task(self, task_id: str):
-        """Remove parse buffer for a finished task (call after notify_task_ended)."""
+        """Remove parse buffer for a finished task."""
         with self._buf_lock:
             self._buffers.pop(task_id, None)

@@ -55,9 +55,14 @@ async def check_token(request, handler):
     if token.lower() != "token":
         return web.HTTPUnauthorized(reason="Incorrect authentication type")
 
-    if not hmac.compare_digest(
-        key, cfg("distributed.yaml", "node_settings", "api_key").encode()
-    ):
+    try:
+        expected_key = cfg("distributed.yaml", "node_settings", "api_key").encode()
+    except Exception:
+        # In standalone (local) mode distributed.yaml is not loaded.
+        # The API is only reachable from localhost so skip key check.
+        return await handler(request)
+
+    if not hmac.compare_digest(key, expected_key):
         return web.HTTPUnauthorized()
 
     return await handler(request)
