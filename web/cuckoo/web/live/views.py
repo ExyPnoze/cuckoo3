@@ -112,7 +112,7 @@ class LiveSessionApiView(View):
             "jwt": jwt,
             "expires_at": expires_at,
             "telemetry_ws_url": f"{scheme}://{host}/ws/live/{node_name}/{task_id}?token={jwt}",
-            "vnc_ws_url": f"{scheme}://{host}/ws/vnc/{node_name}/{vnc_token}" if vnc_token else None,
+            "vnc_ws_url": f"{scheme}://{host}/ws/vnc/{node_name}?token={vnc_token}" if vnc_token else None,
             "vnc_token": vnc_token,
             "vnc_port": vnc_port,
         })

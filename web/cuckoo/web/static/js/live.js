@@ -187,13 +187,13 @@
   /* -----------------------------------------------------------------------
    * noVNC
    * --------------------------------------------------------------------- */
-  function loadNoVNC(vncWsUrl) {
+  function loadNoVNC(vncWsUrl, vncPassword) {
     // Try to load noVNC from /static/novnc/core/rfb.js
     const script = document.createElement("script");
     script.type = "module";
     script.textContent = `
       import RFB from "/static/novnc/core/rfb.js";
-      window._initRFB = function(wsUrl) {
+      window._initRFB = function(wsUrl, password) {
         const container = document.getElementById("vnc-canvas-container");
         document.getElementById("vnc-placeholder").style.display = "none";
         try {
@@ -209,13 +209,18 @@
             document.getElementById("vnc-status").textContent =
               ev.detail.clean ? "disconnected" : "lost";
           });
+          rfb.addEventListener("credentialsrequired", () => {
+            if (password) {
+              rfb.sendCredentials({ password: password });
+            }
+          });
           window._rfbInstance = rfb;
         } catch(e) {
           document.getElementById("vnc-status").className = "error";
           document.getElementById("vnc-status").textContent = "failed: " + e;
         }
       };
-      window._initRFB(${JSON.stringify(vncWsUrl)});
+      window._initRFB(${JSON.stringify(vncWsUrl)}, ${JSON.stringify(vncPassword || null)});
     `;
     document.head.appendChild(script);
     setVncStatus("connecting", "connecting…");
@@ -248,7 +253,7 @@
       return;
     }
 
-    const { telemetry_ws_url, vnc_ws_url, jwt } = sessionInfo;
+    const { telemetry_ws_url, vnc_ws_url, vnc_token, jwt } = sessionInfo;
 
     if (telemetry_ws_url) {
       connectTelemetry(telemetry_ws_url);
@@ -257,7 +262,7 @@
     }
 
     if (vnc_ws_url) {
-      loadNoVNC(vnc_ws_url);
+      loadNoVNC(vnc_ws_url, vnc_token);
     } else {
       setVncStatus("unavailable", "VNC not available");
       el("vnc-placeholder").textContent = "VNC not available for this session.";
