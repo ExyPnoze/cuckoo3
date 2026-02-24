@@ -69,9 +69,7 @@
       setVncStatus("error", "task ended");
       if (ws) ws.close();
       if (rfb) rfb.disconnect();
-      const notice = el("live-ended-notice");
-      notice.style.display = "";
-      notice.innerHTML = 'Task finished. <a href="/analysis/' + analysisId + '/task/' + taskId + '" class="button is-small">View Report</a>';
+      showEndedBanner();
       return;
     }
 
@@ -145,6 +143,12 @@
     }
   }
 
+  function showEndedBanner() {
+    const notice = el("live-ended-notice");
+    notice.style.display = "";
+    notice.innerHTML = 'Analysis finished. <a href="/analysis/' + analysisId + '/task/' + taskId + '">View Report &rarr;</a>';
+  }
+
   function escHtml(str) {
     return String(str)
       .replace(/&/g,"&amp;")
@@ -178,11 +182,20 @@
     };
 
     ws.onclose = (ev) => {
-      if (ev.code !== 1000) {
-        setWsStatus("disconnected", "disconnected (code " + ev.code + ")");
-        // Reconnect after 3 seconds if not intentional close
-        setTimeout(() => connectTelemetry(wsUrl), 3000);
-      }
+      if (ev.code === 1000) return; // intentional close
+      setWsStatus("disconnected", "reconnecting…");
+      setTimeout(async () => {
+        // Check if the task is still running before reconnecting
+        try {
+          const resp = await fetch(apiBase + "/live");
+          if (resp.status === 409 || !resp.ok) {
+            showEndedBanner();
+            setWsStatus("disconnected", "task ended");
+            return;
+          }
+        } catch (_) {}
+        connectTelemetry(wsUrl);
+      }, 3000);
     };
   }
 
@@ -242,9 +255,7 @@
         const msg = body.error || resp.statusText;
         setWsStatus("disconnected", "API error: " + msg);
         if (resp.status === 409) {
-          // Task not running yet or already finished
-          el("live-ended-notice").style.display = "";
-          el("live-ended-notice").textContent = "Task is not running (state: " + (body.state || "?") + ")";
+          showEndedBanner();
         }
         setVncStatus("unavailable", "unavailable");
         return;
