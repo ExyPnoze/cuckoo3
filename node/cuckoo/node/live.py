@@ -10,6 +10,8 @@ distributes JSON-serialised events to all active WebSocket subscribers.
 
 import asyncio
 import json
+import socket
+import struct
 import threading
 from collections import defaultdict
 
@@ -23,15 +25,59 @@ _MAX_EVENT_BYTES = 1024 * 1024  # 1 MB safety cap per event
 # never appear in the live panel. Compared case-insensitively against the
 # basename of the image path.
 _NOISE_PROCESSES = frozenset({
-    "tmstage.exe",    # Cuckoo stager binary
-    "smss.exe",       # Windows Session Manager
-    "csrss.exe",      # Client/Server Runtime
-    "wininit.exe",    # Windows Initialization
-    "lsass.exe",      # Local Security Authority
-    "winlogon.exe",   # Windows Logon
-    "services.exe",   # Service Control Manager
-    "registry",       # NT pseudo-process (PID 4 range)
+    # --- Cuckoo infrastructure ---
+    "tmstage.exe",              # Cuckoo stager binary
+    # --- Core Windows OS (never malware-spawned) ---
+    "smss.exe",                 # Session Manager
+    "csrss.exe",                # Client/Server Runtime
+    "wininit.exe",              # Windows Initialization
+    "lsass.exe",                # Local Security Authority
+    "winlogon.exe",             # Windows Logon
+    "services.exe",             # Service Control Manager
+    "registry",                 # NT pseudo-process (PID 4 range)
+    "spoolsv.exe",              # Print Spooler
+    "dwm.exe",                  # Desktop Window Manager
+    "fontdrvhost.exe",          # Font Driver Host
+    "sihost.exe",               # Shell Infrastructure Host
+    "userinit.exe",             # User Init (runs once at logon)
+    # --- Windows service hosts (dozens of legitimate instances) ---
+    "svchost.exe",              # Generic Service Host
+    "taskhostw.exe",            # Task Scheduler Host
+    "wmiprvse.exe",             # WMI Provider Host
+    "runtimebroker.exe",        # UWP Runtime Broker
+    "applicationframehost.exe", # UWP App Frame Host
+    "backgroundtaskhost.exe",   # Background Task Host
+    "searchui.exe",             # Cortana/Search UI
+    "shellexperiencehost.exe",  # Shell Experience Host
+    # --- Windows telemetry / update (always noise in sandbox) ---
+    "compattelrunner.exe",      # Compatibility Telemetry
+    "devicecensus.exe",         # Device Census
+    "sihclient.exe",            # Update Health Client
+    "usoclient.exe",            # Update Session Orchestrator
+    "wsqmcons.exe",             # WSQM Consumer
+    "msfeedssync.exe",          # MSN Feeds Sync
+    # --- Windows licensing (fires at VM boot, not malware) ---
+    "sppsvc.exe",               # Software Protection
+    "sppextcomobj.exe",         # SPP Extension
+    "slui.exe",                 # Software Licensing UI
 })
+
+# IP protocol number → display name
+_PROTO_MAP = {1: "ICMP", 6: "TCP", 17: "UDP", 47: "GRE", 50: "ESP", 51: "AH"}
+
+
+def _fixed32_to_ip(val) -> str:
+    """Convert a protobuf fixed32 integer to a dotted-decimal IP string.
+
+    Threemon stores IPs as network-byte-order uint32 in the protobuf fixed32
+    field; MessageToDict returns them as Python ints.
+    """
+    if not isinstance(val, int):
+        return str(val) if val is not None else ""
+    try:
+        return socket.inet_ntoa(struct.pack(">I", val))
+    except Exception:
+        return str(val)
 
 
 def _is_noise_network(d: dict, resultserver_ip: str) -> bool:
@@ -153,18 +199,21 @@ def _proto_to_dict(msg) -> dict:
 def _normalize(kind_name: str, d: dict) -> dict:
     """Map raw protobuf field names to the field names live.js expects."""
     if kind_name == "process":
+        image = d.get("image", "")
         return {
             "pid":        d.get("pid"),
-            "image":      d.get("image", ""),
+            "image":      image,
+            "name":       image.rsplit("\\", 1)[-1] if image else "unknown",
             "parent_pid": d.get("ppid"),
             "command":    d.get("command", ""),
         }
     if kind_name == "network":
+        proto_num = d.get("proto")
         return {
-            "src_ip":   d.get("srcip", ""),
-            "dst_ip":   d.get("dstip", ""),
+            "src_ip":   _fixed32_to_ip(d.get("srcip")),
+            "dst_ip":   _fixed32_to_ip(d.get("dstip")),
             "dst_port": d.get("dstport"),
-            "proto":    d.get("proto"),
+            "proto":    _PROTO_MAP.get(proto_num, str(proto_num) if proto_num is not None else ""),
             "pid":      d.get("pid"),
         }
     if kind_name == "file":
@@ -227,8 +276,14 @@ class LiveEventBroker:
 
         for kind, raw in messages:
             event = _parse_event(kind, raw)
-            if event and not self._is_noise(event):
-                self._dispatch(task_id, event)
+            if not event:
+                continue
+            try:
+                if self._is_noise(event):
+                    continue
+            except Exception:
+                pass  # never drop an event due to a filter error
+            self._dispatch(task_id, event)
 
     def _is_noise(self, event: dict) -> bool:
         """Return True if the event should be suppressed from the live panel."""

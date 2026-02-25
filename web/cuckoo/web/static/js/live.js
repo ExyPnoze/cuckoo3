@@ -79,13 +79,13 @@
     }
 
     if (t === "process") {
-      const pid  = d.pid   || d.process_id || "?";
-      const name = d.image || d.name       || "unknown";
-      const ppid = d.parent_pid ? ` [ppid:${d.parent_pid}]` : "";
+      const pid  = d.pid        || d.process_id || "?";
+      const name = d.name       || d.image      || "unknown";
+      const ppid = d.parent_pid ? ` ← ${d.parent_pid}` : "";
       prependRow("list-process",
         `<span class="ev-pid">${pid}</span> `+
         `<span class="ev-call">${escHtml(name)}</span>`+
-        `<span style="color:#777">${ppid}</span>`);
+        `<span style="color:#666;font-size:0.72rem">${ppid}</span>`);
       updateCount("process");
       return;
     }
