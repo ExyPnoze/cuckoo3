@@ -224,7 +224,8 @@ def start_live_components(ctx, api_loop=None):
     from cuckoo.node.live import LiveEventBroker
     from cuckoo.node.vncproxy import VNCTokenManager, WebsockifyProcess
 
-    broker = LiveEventBroker()
+    rs_ip = config.cfg("cuckoo", "resultserver", "listen_ip")
+    broker = LiveEventBroker(resultserver_ip=rs_ip)
     if api_loop:
         broker.attach_loop(api_loop)
 

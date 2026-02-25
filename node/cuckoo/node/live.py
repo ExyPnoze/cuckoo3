@@ -19,6 +19,54 @@ log = CuckooGlobalLogger(__name__)
 
 _MAX_EVENT_BYTES = 1024 * 1024  # 1 MB safety cap per event
 
+# Process names that are pure Cuckoo/Windows-OS infrastructure and should
+# never appear in the live panel. Compared case-insensitively against the
+# basename of the image path.
+_NOISE_PROCESSES = frozenset({
+    "tmstage.exe",    # Cuckoo stager binary
+    "smss.exe",       # Windows Session Manager
+    "csrss.exe",      # Client/Server Runtime
+    "wininit.exe",    # Windows Initialization
+    "lsass.exe",      # Local Security Authority
+    "winlogon.exe",   # Windows Logon
+    "services.exe",   # Service Control Manager
+    "registry",       # NT pseudo-process (PID 4 range)
+})
+
+
+def _is_noise_network(d: dict, resultserver_ip: str) -> bool:
+    """Return True if the network event is Cuckoo/OS infrastructure noise."""
+    src = d.get("src_ip") or ""
+    dst = d.get("dst_ip") or ""
+
+    # Result server: agent uploads behavioral log here
+    if resultserver_ip and (dst == resultserver_ip or src == resultserver_ip):
+        return True
+
+    # Multicast (224.x.x.x, 239.x.x.x)
+    for ip in (src, dst):
+        if ip.startswith("224.") or ip.startswith("239."):
+            return True
+
+    # Broadcast
+    if dst == "255.255.255.255":
+        return True
+
+    # Loopback
+    if dst.startswith("127.") or src.startswith("127."):
+        return True
+
+    return False
+
+
+def _is_noise_process(d: dict) -> bool:
+    """Return True if the process event is Cuckoo/OS infrastructure noise."""
+    image = (d.get("image") or "").lower()
+    # Strip Windows path — keep only the basename
+    image = image.rsplit("\\", 1)[-1]
+    return image in _NOISE_PROCESSES
+
+
 # Threemon event kind byte -> (friendly_name, pb2_module_attr, pb2_class_name)
 _KIND_MAP = {
     1:  ("process",  "process_pb2",  "Process"),
@@ -150,7 +198,8 @@ class LiveEventBroker:
     asyncio event loop owned by the webapi.
     """
 
-    def __init__(self):
+    def __init__(self, resultserver_ip: str = ""):
+        self._resultserver_ip = resultserver_ip
         self._loop: asyncio.AbstractEventLoop | None = None
 
         # Per-task parse buffers
@@ -178,8 +227,18 @@ class LiveEventBroker:
 
         for kind, raw in messages:
             event = _parse_event(kind, raw)
-            if event:
+            if event and not self._is_noise(event):
                 self._dispatch(task_id, event)
+
+    def _is_noise(self, event: dict) -> bool:
+        """Return True if the event should be suppressed from the live panel."""
+        t = event.get("type")
+        d = event.get("data") or {}
+        if t == "network":
+            return _is_noise_network(d, self._resultserver_ip)
+        if t == "process":
+            return _is_noise_process(d)
+        return False
 
     def notify_screenshot(self, task_id: str, fname: str, ts: int):
         """Notify subscribers that a new screenshot was saved."""
