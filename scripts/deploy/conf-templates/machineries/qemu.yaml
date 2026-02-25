@@ -1,0 +1,21 @@
+# Specify the name of the network interface/bridge that is the default gateway
+# for the QEMU machines.
+interface: br0
+
+# Make disposable copies of machine disk images here. Copies are created each
+# time the machine is restored. This directory path must be writable and
+# readable. If this not specified, the directory of the 'qcow2_path' of each
+# machine will be used.
+disposable_copy_dir:
+
+# The paths to binaries used to create disks, restore, and
+# start virtual machines
+binaries:
+  # Path to qemu-img.
+  qemu_img: /usr/bin/qemu-img
+  # Path to qemu-system-x86_64
+  qemu_system_x86_64: /usr/bin/qemu-system-x86_64
+
+# Import VMs with: cuckoo machine import qemu ~/.vmcloak/vms/
+# Or add manually with: cuckoo machine add qemu <name> key=value...
+machines: {}
