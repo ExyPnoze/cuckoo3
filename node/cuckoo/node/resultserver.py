@@ -181,6 +181,12 @@ class WriteLimiter:
     def flush(self):
         self.fp.flush()
 
+    def tell(self):
+        return self.fp.tell()
+
+    def close(self):
+        self.fp.close()
+
 
 class FileUpload(ProtocolHandler):
     # Pattern matching behavioural log files we want to stream live
