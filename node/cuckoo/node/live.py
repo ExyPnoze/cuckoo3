@@ -65,17 +65,45 @@ _NOISE_PROCESSES = frozenset({
 # IP protocol number → display name
 _PROTO_MAP = {1: "ICMP", 6: "TCP", 17: "UDP", 47: "GRE", 50: "ESP", 51: "AH"}
 
+# Registry: read-only / handle-management operations — never malware indicators
+_NOISE_REGISTRY_OPS = frozenset({
+    "EnumerateKey",
+    "EnumerateValueKey",
+    "FlushKey",
+    "KeyHandleClose",
+    "OpenKey",
+    "OpenKeyEx",
+    "QueryKey",
+    "QueryKeySecurity",
+    "QueryMultipleValueKey",
+    "QueryValueKey",
+    "SetInformationKey",
+    "SetKeySecurity",
+})
+
+# File: read-only / unknown operations — not actionable for malware analysis
+_NOISE_FILE_OPS = frozenset({
+    "OpenRead",
+    "CreateRead",
+})
+
+# File: Windows infrastructure paths — always noise in sandbox
+_NOISE_FILE_PATH_SUBSTRINGS = (
+    "\\winsxs\\",
+    "\\windows\\assembly\\",
+)
+
 
 def _fixed32_to_ip(val) -> str:
     """Convert a protobuf fixed32 integer to a dotted-decimal IP string.
 
-    Threemon stores IPs as network-byte-order uint32 in the protobuf fixed32
-    field; MessageToDict returns them as Python ints.
+    Threemon stores IPs as host-byte-order (little-endian) uint32 in the
+    protobuf fixed32 field; MessageToDict returns them as Python ints.
     """
     if not isinstance(val, int):
         return str(val) if val is not None else ""
     try:
-        return socket.inet_ntoa(struct.pack(">I", val))
+        return socket.inet_ntoa(struct.pack("<I", val))
     except Exception:
         return str(val)
 
@@ -111,6 +139,21 @@ def _is_noise_process(d: dict) -> bool:
     # Strip Windows path — keep only the basename
     image = image.rsplit("\\", 1)[-1]
     return image in _NOISE_PROCESSES
+
+
+def _is_noise_registry(d: dict) -> bool:
+    """Return True if the registry event is a read-only/handle operation."""
+    return d.get("operation", "") in _NOISE_REGISTRY_OPS
+
+
+def _is_noise_file(d: dict) -> bool:
+    """Return True if the file event is a read-only operation or WinSxS path."""
+    op = d.get("operation", "")
+    # Empty operation = proto3 default enum value 0 = Unknown kind
+    if not op or op in _NOISE_FILE_OPS:
+        return True
+    path = (d.get("path") or "").lower()
+    return any(sub in path for sub in _NOISE_FILE_PATH_SUBSTRINGS)
 
 
 # Threemon event kind byte -> (friendly_name, pb2_module_attr, pb2_class_name)
@@ -293,6 +336,10 @@ class LiveEventBroker:
             return _is_noise_network(d, self._resultserver_ip)
         if t == "process":
             return _is_noise_process(d)
+        if t == "registry":
+            return _is_noise_registry(d)
+        if t == "file":
+            return _is_noise_file(d)
         return False
 
     def notify_screenshot(self, task_id: str, fname: str, ts: int):
